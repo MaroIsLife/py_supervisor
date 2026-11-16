@@ -14,6 +14,7 @@ The guide is in this order:
 9. Logging and alerts
 10. Defense checklist
 11. Questions the grader will probably ask
+12. Shell commands, one by one
 
 ---
 
@@ -200,6 +201,7 @@ A daemon is a program with no terminal that runs in the background. `daemonize()
 | file | lines | what it contains |
 |---|---|---|
 | `taskmaster`, `taskmasterd`, `taskmasterctl` | 7 each | launchers: they call `tmlib/main.py` |
+| `Makefile` | | `make` creates a virtual environment `.venv` and installs PyYAML; `make run` / `daemon` / `ctl` start the programs with it |
 | `tmlib/main.py` | ~135 | **where everything starts**: parse arguments, install signal handlers, start the engine and/or shell, daemonize |
 | `tmlib/config.py` | ~170 | reads the YAML file, **checks** every option, fills defaults, returns `ProgramConfig` objects |
 | `tmlib/process.py` | ~250 | **one process**: fork/exec, reading its output, its state machine |
@@ -675,7 +677,8 @@ background thread, so a slow server never freezes the loop.
 Terminal A:
 
 ```bash
-./taskmaster -c taskmaster.yaml
+make            # first time only: creates .venv and installs PyYAML
+make run        # same as ./taskmaster -c taskmaster.yaml, using the .venv Python
 ```
 
 Terminal B:
@@ -700,7 +703,7 @@ tail -f logs/taskmaster.log
 | stdout/stderr | `cat logs/ticker.stdout`, `logs/crasher.stderr`. showenv's stderr is discarded |
 | env / workingdir / umask | `cat logs/showenv.stdout` and `ls -l /tmp/show_env_created_file` → `-rw-------` |
 | Tests | `kill -9` a ticker PID → restarted. crasher → FATAL. `start flood` (huge output, stays fast). Try to break it |
-| Bonus client/server | `./taskmasterd`, then `./taskmasterctl` (interactive) or `./taskmasterctl status`, then `./taskmasterctl shutdown` |
+| Bonus client/server | `make daemon`, then `make ctl` (or `./taskmasterctl status`), then `shutdown` |
 | Bonus attach (2 pts) | `attach echo`, type `hi` → `ECHO: HI`, Ctrl-D. `status echo` shows the same PID |
 | Bonus alerts | uncomment `http_alert`/`email_alert`, run `python3 programs/webhook_server.py 8080` and `python3 programs/fake_smtp.py 1025`, then `reload`, `restart crasher` → alerts arrive |
 | Bonus user | uncomment `asnobody`, `sudo ./taskmaster -c taskmaster.yaml`, `tail asnobody` → `uid=65534(nobody)` |
@@ -750,3 +753,310 @@ send requests (a flag or a socket message), so nothing is ever modified from two
 
 **Which external libraries?** Only PyYAML, for the config, which the subject allows. Everything else is the
 Python standard library (`os`, `signal`, `select`, `socket`, `cmd`, `readline`, `logging`...).
+
+---
+
+## 12. Shell commands, one by one
+
+### 12.1 How every command travels
+
+All commands take the same path, except `help` and `quit`/`exit` in `taskmasterctl`, which never leave the shell.
+
+1. **`Shell.run`** (`shell.py:91`) shows the `taskmaster>` prompt. `cmd.Cmd` reads the line with
+   readline, which gives you line editing, ↑/↓ history and TAB completion. It then calls the method
+   named `do_<first word>`, for example `do_stop` for `stop ticker`.
+2. **`send_command`** (`shell.py:110`) splits the rest of the line into arguments and calls
+   **`Connection.request`** (`shell.py:56`).
+3. **`Connection.request`** writes one JSON line to the socket, for example
+   `{"cmd": "stop", "args": ["ticker"]}`, then waits for one JSON line back: `{"output": "..."}`.
+4. On the engine side, **`poll_io`** (`engine.py:102`) sees the socket is readable. **`read_client`**
+   (`engine.py:176`) reads the line and **`handle`** (`engine.py:195`) calls the matching `cmd_<name>`
+   function.
+5. A `cmd_` function either returns the answer text, which `handle` sends at once, or returns `None`
+   and registers a **`when`** (`engine.py:138`). With `when`, the answer is sent later, once the
+   processes have reached the expected state.
+6. The shell prints the `output` text and shows the prompt again.
+
+**Process names** (accepted by `status`, `start`, `stop`, `restart`, `pid`), handled by
+**`resolve`** (`engine.py:215`):
+
+| you type | means |
+|---|---|
+| `ticker` or `ticker:*` | every process of the program `ticker` |
+| `ticker:1` | only instance 1 (programs with `numprocs` > 1) |
+| `all` | every process of every program |
+| `nope` | `nope: ERROR (no such process)` |
+
+You can give several names at once: `stop ticker:0 echo`.
+
+---
+
+### 12.2 `status [name...]`
+
+**What it does:** prints one line per process: name, state, and details.
+
+```
+ticker:0             RUNNING   pid 4242, uptime 0:01:13
+crasher              FATAL     Exited too quickly (process log may have details)
+exiter               EXITED    exit status 2 (expected)
+```
+
+**How it works:**
+- **`do_status`** (`shell.py:121`) sends `status`.
+- **`cmd_status`** (`engine.py:236`) runs:
+  - with no name, it uses **`all_processes`** (`engine.py:74`), so the list includes processes still
+    dying after a reload;
+  - with names, it uses `resolve`.
+- Each line is built by **`Process.status_line`** (`process.py:247`):
+  - RUNNING shows the pid and uptime;
+  - STARTING and STOPPING show the pid;
+  - every other state shows `info`, the reason for the last change, such as
+    `Stopped (terminated by SIGTERM)` or `exit status 2 (unexpected)`.
+- It answers immediately.
+
+---
+
+### 12.3 `start <name...>`
+
+**What it does:** starts the processes and answers once each one is RUNNING or has failed.
+
+```
+taskmaster> start exiter
+exiter: started
+```
+
+**How it works:**
+- **`do_start`** (`shell.py:125`) sends the request; **`cmd_start`** (`engine.py:241`) calls
+  **`start_and_reply`** (`engine.py:245`).
+- Processes already STARTING, RUNNING or STOPPING are skipped:
+  `exiter: ERROR (already running)`.
+- Every other process gets `Process.start(now, manual=True)` (`process.py:148`), which forks and execs
+  as in scenario A. `manual=True` resets the retry counter, so `start` can relaunch a FATAL process.
+- A `when` waits until no process is STARTING anymore, for at most `starttime` + 1 seconds. That is
+  why `start` takes about `starttime` seconds to answer. Then each process gets one line:
+  - **RUNNING** → `name: started`;
+  - **BACKOFF or FATAL** → `name: ERROR (BACKOFF: Exited too quickly ...)`. This means it died before
+    `starttime`. It keeps retrying on its own, as in scenario C.
+
+---
+
+### 12.4 `stop <name...>`
+
+**What it does:** stops the processes and answers only when they are really dead.
+
+```
+taskmaster> stop stubborn          (waits 3 s: stoptime)
+stubborn: stopped
+```
+
+**How it works:**
+- **`do_stop`** (`shell.py:129`) sends the request; **`cmd_stop`** (`engine.py:274`) calls
+  **`stop_all`** (`engine.py:263`), which calls **`Process.stop`** (`process.py:179`) on each process.
+- What `Process.stop` does depends on the state:
+  - **STARTING or RUNNING:** it sends `stopsignal` to the process group with `killpg`, moves to
+    STOPPING, and sets `kill_time = now + stoptime`.
+  - **BACKOFF:** it cancels the pending retry and goes straight to STOPPED.
+  - **any other state:** it answers `name: ERROR (not running)`.
+- A `when` waits until none of these processes is alive, for at most `stoptime` + 2 seconds.
+  Meanwhile, **`Process.tick`** (`process.py:202`) sends SIGKILL if `stoptime` passes.
+- When **`waitpid`** reports a death, **`Process.exited`** marks the process STOPPED and the shell
+  prints `name: stopped`.
+
+---
+
+### 12.5 `restart <name...>`
+
+**What it does:** stops the processes, waits until they are dead, then starts them again.
+
+```
+taskmaster> restart ticker:1
+ticker:1: started
+```
+
+**How it works:**
+- **`cmd_restart`** (`engine.py:284`) calls `stop_all`, ignoring "not running" errors so that
+  `restart` also works on stopped, EXITED or FATAL processes.
+- It then registers a `when`: once they are all dead, it runs `start_and_reply`, which is the same
+  logic as `start`.
+- The answer is the one from `start`.
+
+---
+
+### 12.6 `reload`
+
+**What it does:** reads the config file again and applies only what changed. It is the same as
+`kill -HUP <taskmaster pid>`.
+
+```
+taskmaster> reload
+ticker: numprocs 2 -> 3
+stubborn: changed, restarted
+flood: removed
+newprog: added
+unchanged, not restarted: crasher, exiter, showenv, echo
+```
+
+**How it works:**
+- **`do_reload`** (`shell.py:137`) sends the request; **`cmd_reload`** (`engine.py:291`) calls
+  **`reload`** (`engine.py:294`). This is the same function the SIGHUP handler triggers.
+- `reload` compares each program's old and new `ProgramConfig` (scenario F), then:
+  - stops removed or changed programs;
+  - starts added programs;
+  - leaves identical programs alone.
+- It answers immediately with the report. A changed program starts its new version on its own once
+  its old processes are dead.
+- If the new file is invalid, the answer is `ERROR: ...` and `configuration NOT changed`. The running
+  config stays as it was.
+
+---
+
+### 12.7 `config [program]`
+
+**What it does:** shows the configuration as taskmaster understood it, after defaults were filled in
+and relative paths turned into absolute ones. Use it in the defense to show the grader each option.
+
+```
+taskmaster> config showenv
+[showenv]
+  cmd          /…/programs/show_env.py
+  numprocs     1
+  umask        077
+  workingdir   /tmp
+  ...
+```
+
+**How it works:**
+- **`cmd_config`** (`engine.py:380`) reads the stored `ProgramConfig` with `vars(prog)` and prints
+  each field. `umask` is shown in octal.
+- With no argument, it prints the config file path and the global `taskmaster:` settings: log file,
+  socket and alerts.
+- It never re-reads the file. It shows what is **loaded**, which is what matters after a `reload`.
+
+---
+
+### 12.8 `tail <name> [stdout|stderr]`
+
+**What it does:** shows the most recent output of one process. `stdout` is the default.
+
+```
+taskmaster> tail ticker:0
+[tick] tick 41
+[tick] tick 42
+```
+
+**How it works:**
+- Each time the engine reads a process's pipe, **`Process.read`** (`process.py:116`) appends the
+  bytes to the log file (if one is set) and keeps the **last 8 KB in memory** in `tails[stream]`
+  (`process.py:135`).
+- **`cmd_tail`** (`engine.py:406`) finds the process with **`find_one`** (`engine.py:398`), which
+  needs a single process: `tail ticker` asks you to choose `ticker:0` or `ticker:1`. It then returns
+  that memory buffer.
+- Because the buffer is in memory, `tail` works even with `stdout: discard`.
+
+---
+
+### 12.9 `pid [name...]`
+
+**What it does:**
+- `pid` alone prints taskmaster's own PID. Use it with `kill -HUP` or `kill`.
+- `pid ticker` prints each process's PID. The PID is 0 when the process is not running.
+
+```
+taskmaster> pid ticker
+ticker:0: 4242
+ticker:1: 4243
+```
+
+**How it works:** **`cmd_pid`** (`engine.py:415`) returns `os.getpid()`, or `Process.pid` for each
+process returned by `resolve`. From another terminal: `kill -9 $(./taskmasterctl pid ticker:0 | awk '{print $2}')`.
+
+---
+
+### 12.10 `attach <name>` (bonus)
+
+**What it does:** connects your terminal to a running process:
+- you see what it prints, live;
+- each line you type is written to its stdin;
+- **Ctrl-D** (or Ctrl-C) detaches you, and the process keeps running.
+
+```
+taskmaster> attach echo
+--- attached to echo (Ctrl-D to detach) ---
+hello
+ECHO: HELLO
+^D
+--- detached from echo (it keeps running) ---
+```
+
+**How it works:**
+- **`do_attach`** (`shell.py:172`) sends `attach`. **`cmd_attach`** (`engine.py:427`) sets
+  `client.attached = process` and sends back the last 2 KB of its output.
+- After that, every time **`poll_io`** reads this process's output, it forwards the output to every
+  attached client.
+- The shell uses `select` to wait on your keyboard and the socket at the same time (`shell.py:190`):
+  - output that arrives is printed;
+  - a line you type is sent as `{"cmd": "input"}`. **`cmd_input`** (`engine.py:436`) calls
+    **`Process.write_stdin`**, which writes it into the process's stdin pipe.
+- Ctrl-D sends `detach`. **`cmd_detach`** (`engine.py:440`) sets `attached = None`.
+- An attachment survives restarts of the process, because it is linked to the `Process` object, not
+  to one PID.
+
+---
+
+### 12.11 `shutdown`
+
+**What it does:** stops every program, then stops taskmaster itself. In `taskmasterctl`, this stops
+the daemon.
+
+```
+taskmaster> shutdown
+taskmaster: all programs stopped, bye
+```
+
+**How it works:**
+- **`do_shutdown`** (`shell.py:153`) sends the request. **`cmd_shutdown`** (`engine.py:363`) calls
+  **`shutdown`** (`engine.py:368`), which stops everything with `stop_all`.
+- A `when` waits for all deaths; SIGKILL is sent after each program's `stoptime`.
+- **`finish`** then answers and sets `finished = True`. The main loop ends and **`cleanup`** deletes
+  the socket file.
+- If you run it twice, the second time answers `already shutting down`.
+
+---
+
+### 12.12 `quit` / `exit` / Ctrl-D
+
+**What it does:**
+- **In `./taskmaster`:** the same as `shutdown`, because the program runs in the foreground, so
+  leaving the shell means stopping taskmaster.
+- **In `taskmasterctl`:** only leaves the shell. The daemon and its programs keep running.
+
+**How it works:**
+- **`do_quit`** (`shell.py:159`) checks `self.embedded`, which is True only for the shell started
+  by `./taskmaster`:
+  - if True, it calls `do_shutdown`;
+  - otherwise it sets `finished = True` and returns.
+- Ctrl-D at the prompt sends end-of-file, which `cmd.Cmd` turns into **`do_EOF`** (`shell.py:168`).
+  That method calls `do_quit`.
+
+---
+
+### 12.13 `help [command]`
+
+**What it does:**
+- `help` lists the commands.
+- `help stop` prints the one-line description of `stop`.
+
+**How it works:** it is built into Python's `cmd.Cmd`. The text shown is the docstring (the first
+`"""..."""` line) of each `do_` method in `shell.py`. It never contacts the engine.
+
+---
+
+### 12.14 Keys and hidden commands
+
+| key / command | effect | where |
+|---|---|---|
+| **TAB** | completes command names, then process names | `completenames` / `completedefault` (`shell.py:113-117`). For names, it asks the engine with the hidden command **`names`** (`engine.py:421`) |
+| **↑ / ↓** | browse command history, saved in `~/.taskmaster_history` | `setup_readline` (`shell.py:65`) |
+| **Ctrl-C** | cancels the current line or wait and shows a new prompt. Taskmaster keeps running | `Shell.run` (`shell.py:97-99`), scenario K |
+| unknown word | `*** Unknown command: foo (type 'help')` | `Shell.default` (`shell.py:107`) |
+| `input`, `detach` | internal messages used only by `attach`; you never type them | `engine.py:436-444` |
