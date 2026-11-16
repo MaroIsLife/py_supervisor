@@ -1,0 +1,92 @@
+# Taskmaster demo configuration.
+# Relative paths are relative to THIS file's directory.
+
+taskmaster:
+  logfile: ./logs/taskmaster.log      # event log (mandatory logging)
+  socket: /tmp/taskmaster.sock        # UNIX socket used by taskmasterctl (bonus)
+  syslog: false                       # bonus: also send events to syslog
+  # http_alert: http://127.0.0.1:8080/alert          # bonus: POST alerts (programs/webhook_server.py)
+  # email_alert: {host: 127.0.0.1, port: 1025, from: taskmaster@localhost, to: admin@localhost}  # bonus (programs/fake_smtp.py)
+
+programs:
+  # Every option, on a simple long-running program
+  ticker:
+    cmd: "programs/ticker.py tick"    # command to launch
+    numprocs: 2                        # number of processes to keep alive (ticker:0, ticker:1)
+    umask: 022                         # umask before exec
+    workingdir: /tmp                   # cwd before exec
+    autostart: true                    # start when taskmaster starts
+    autorestart: unexpected            # always | never | unexpected
+    exitcodes: [0, 2]                  # "expected" exit codes
+    startretries: 3                    # restart attempts before FATAL
+    starttime: 2                       # seconds alive to be "successfully started"
+    stopsignal: TERM                   # graceful stop signal
+    stoptime: 5                        # seconds before SIGKILL after a graceful stop
+    stdout: ./logs/ticker.stdout       # redirect stdout to a file
+    stderr: ./logs/ticker.stderr       # redirect stderr to a file
+    env:                               # extra environment variables
+      STARTED_BY: taskmaster
+      ANSWER: 42
+
+  # Can only fail -> BACKOFF x3 -> FATAL
+  crasher:
+    cmd: "programs/crasher.py"
+    autostart: true
+    autorestart: unexpected
+    startretries: 3
+    starttime: 1
+    stderr: ./logs/crasher.stderr
+
+  # Exits with code 2 after 4s. 2 is NOT in exitcodes -> unexpected -> restarted.
+  # Change exitcodes to [0, 2] and reload: it stays EXITED.
+  # Change autorestart to always/never to see the difference.
+  exiter:
+    cmd: "programs/exit_with.py 2 4"
+    autostart: false
+    autorestart: unexpected
+    exitcodes: [0]
+    starttime: 1
+    stdout: ./logs/exiter.stdout
+
+  # Ignores SIGTERM. With stopsignal TERM it is SIGKILLed after stoptime (3s).
+  # Change stopsignal to USR1 and reload: it stops gracefully at once.
+  stubborn:
+    cmd: "programs/stubborn.py"
+    autostart: true
+    stopsignal: TERM
+    stoptime: 3
+    stdout: ./logs/stubborn.stdout
+
+  # Shows env, workingdir and umask in its stdout
+  showenv:
+    cmd: "programs/show_env.py"
+    autostart: true
+    workingdir: /tmp
+    umask: 077
+    env:
+      STARTED_BY: taskmaster
+      ANSWER: 42
+      GREETING: "hello from the config"
+    stdout: ./logs/showenv.stdout
+    stderr: discard                    # throw stderr away
+
+  # Huge output, everything discarded (stress test)
+  flood:
+    cmd: "programs/flood.py"
+    autostart: false
+    stdout: discard
+    stderr: discard
+
+  # Interactive program for the 'attach' bonus
+  echo:
+    cmd: "programs/echo_repl.py"
+    autostart: true
+    autorestart: always
+    stdout: ./logs/echo.stdout
+
+  # Bonus: privilege de-escalation. Start taskmaster with sudo for this to work.
+  # asnobody:
+  #   cmd: "/usr/bin/id"
+  #   user: nobody
+  #   autorestart: never
+  #   stdout: /tmp/asnobody.stdout
