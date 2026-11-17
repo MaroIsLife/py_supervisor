@@ -90,3 +90,47 @@ programs:
   #   user: nobody
   #   autorestart: never
   #   stdout: /tmp/asnobody.stdout
+
+# =============================================================================
+# REFERENCE: every option this file accepts
+# =============================================================================
+#
+# taskmaster:                  # optional section: settings of taskmaster itself
+#   logfile: PATH              # event log                     (default /tmp/taskmaster.log)
+#   socket: PATH               # control socket, keep it short (default /tmp/taskmaster.sock)
+#   syslog: true|false         # bonus: copy events to syslog  (default false)
+#   http_alert: URL            # bonus: POST a JSON alert on FATAL / unexpected exit
+#   email_alert:               # bonus: send an e-mail for the same events
+#     host: HOST               #   SMTP server                 (default localhost)
+#     port: NUMBER             #   SMTP port                   (default 25)
+#     from: ADDRESS            #   sender                      (default taskmaster@localhost)
+#     to: ADDRESS              #   recipient (required)
+#
+# programs:                    # required section
+#   NAME:                      # program name, no ':' (numprocs > 1 -> NAME:0, NAME:1 ...)
+#     cmd: "COMMAND ARGS"      # REQUIRED. Split like a shell, but no shell is used:
+#                              #   use "sh -c '...'" for pipes, &&, redirections.
+#                              #   A relative path ("programs/x.py") is relative to this file.
+#     numprocs: N              # copies to start and keep running, >= 1          (default 1)
+#     autostart: true|false    # start when taskmaster starts / when reload adds it (default true)
+#     autorestart: VALUE       # what to do when it dies by itself while RUNNING (default unexpected)
+#                              #   always     -> always restart
+#                              #   never      -> never restart
+#                              #   unexpected -> restart only if the exit code is not in exitcodes
+#                              #                 (a death by signal is always unexpected)
+#     exitcodes: CODE | [CODES]  # "expected" exit codes, 0-255                    (default [0])
+#     starttime: SECONDS       # must stay alive this long to be "successfully started" (default 1)
+#     startretries: N          # failed starts (death before starttime) allowed before FATAL (default 3)
+#     stopsignal: SIGNAL       # graceful stop signal: TERM INT QUIT HUP KILL USR1 USR2 ...
+#                              #   ("SIG" prefix allowed)                          (default TERM)
+#     stoptime: SECONDS        # wait after stopsignal before SIGKILL              (default 10)
+#     stdout: PATH | discard   # where its stdout goes (appended)                  (default discard)
+#     stderr: PATH | discard   # where its stderr goes (appended)                  (default discard)
+#     env:                     # extra environment variables (added to taskmaster's environment)
+#       NAME: value
+#     workingdir: PATH         # directory to chdir into before starting          (default: inherited)
+#     umask: 0NNN              # octal, ALWAYS with a leading 0 (022, 077)         (default: inherited)
+#     user: USERNAME           # bonus: run as this user (taskmaster must be started as root)
+#
+# Apply changes while running: "reload" in the shell, or  kill -HUP <taskmaster pid>
+# Only programs whose options changed are restarted.

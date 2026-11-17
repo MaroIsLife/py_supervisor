@@ -114,8 +114,8 @@ class Shell(cmd.Cmd):
         names = self.conn.request("names").split()
         return [n for n in names if n.startswith(text)]
 
-    def completenames(self, text, *ignored):
-        return [n for n in super().completenames(text, *ignored) if n != "EOF"]
+    def get_names(self):     # hide do_EOF (Ctrl-D) from "help" and TAB completion
+        return [n for n in super().get_names() if n != "do_EOF"]
 
     # ----------------------------------------------------------- commands
     def do_status(self, arg):

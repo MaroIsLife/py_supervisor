@@ -202,6 +202,7 @@ A daemon is a program with no terminal that runs in the background. `daemonize()
 |---|---|---|
 | `taskmaster`, `taskmasterd`, `taskmasterctl` | 7 each | launchers: they call `tmlib/main.py` |
 | `Makefile` | | `make` creates a virtual environment `.venv` and installs PyYAML; `make run` / `daemon` / `ctl` start the programs with it |
+| `bonus.yaml` | | config for `make bonus`: alerts (HTTP, e-mail, syslog) already enabled, plus `ticker`, `crasher` and `echo` to trigger them; the `user` bonus block is ready to uncomment |
 | `tmlib/main.py` | ~135 | **where everything starts**: parse arguments, install signal handlers, start the engine and/or shell, daemonize |
 | `tmlib/config.py` | ~170 | reads the YAML file, **checks** every option, fills defaults, returns `ProgramConfig` objects |
 | `tmlib/process.py` | ~250 | **one process**: fork/exec, reading its output, its state machine |
@@ -366,7 +367,7 @@ Every step names the function that runs, where it is, and what it does.
 5. `process.py:234`: `expected = code is not None and code in exitcodes` gives **False**.
    A death by signal is never expected.
 6. `process.py:235-241`: sets the state to **EXITED** and logs `exited: ... not expected`.
-   It also calls **`EventLogger.alert`** (`logger.py:51`), which sends the bonus HTTP and e-mail alerts.
+   It also calls **`EventLogger.alert`** (`logger.py:39`), which sends the bonus HTTP and e-mail alerts.
 7. `process.py:242-245`: `autorestart == "unexpected"` and the exit was not expected,
    so it logs `restarting:` and calls `start(now, manual=True)`. This is scenario A from step 4 again, with a new pid.
 
@@ -705,8 +706,8 @@ tail -f logs/taskmaster.log
 | Tests | `kill -9` a ticker PID → restarted. crasher → FATAL. `start flood` (huge output, stays fast). Try to break it |
 | Bonus client/server | `make daemon`, then `make ctl` (or `./taskmasterctl status`), then `shutdown` |
 | Bonus attach (2 pts) | `attach echo`, type `hi` → `ECHO: HI`, Ctrl-D. `status echo` shows the same PID |
-| Bonus alerts | uncomment `http_alert`/`email_alert`, run `python3 programs/webhook_server.py 8080` and `python3 programs/fake_smtp.py 1025`, then `reload`, `restart crasher` → alerts arrive |
-| Bonus user | uncomment `asnobody`, `sudo ./taskmaster -c taskmaster.yaml`, `tail asnobody` → `uid=65534(nobody)` |
+| Bonus alerts | `make bonus`: it starts the HTTP and e-mail receivers, the daemon with `bonus.yaml` (alerts + syslog already on) and the shell. In another terminal: `tail -f logs/webhook.log logs/smtp.log`. In the shell: `start crasher` → FATAL → the alert appears in both logs. `kill -9` a ticker → `UNEXPECTED_EXIT` alert. `make bonus-stop` stops everything |
+| Bonus user | uncomment `asnobody` in `bonus.yaml`, run `sudo .venv/bin/python ./taskmaster -c bonus.yaml`, then `tail asnobody` → `uid=...(nobody)` |
 
 Test programs in `programs/`:
 * `ticker.py`: prints forever.
@@ -789,6 +790,21 @@ All commands take the same path, except `help` and `quit`/`exit` in `taskmasterc
 
 You can give several names at once: `stop ticker:0 echo`.
 
+
+**Calls used by every command:**
+
+| call | where | what it does here |
+|---|---|---|
+| `socket.socket(AF_UNIX)` + `connect()` | `shell.py:31-32` | the shell opens a connection to `/tmp/taskmaster.sock` (once, at startup) |
+| `json.dumps` + `sock.sendall()` | `shell.py:37` | sends the command as one line |
+| `sock.recv()` + `json.loads` | `shell.py:45`, `shell.py:54` | reads the answer |
+| `select.select()` | `engine.py:106` | the engine sleeps until a socket or a pipe has data (max 0.1 s) |
+| `server.accept()` | `engine.py:109` | the engine accepts a new shell connection |
+| `sock.recv()` + `json.loads` | `engine.py:178`, `engine.py:188` | the engine reads the command |
+| `json.dumps` + `sock.sendall()` | `engine.py:35` | the engine sends the answer |
+| `os.waitpid(-1, WNOHANG)` | `engine.py:128` | runs on every loop turn, whatever the command: collects dead children |
+| `time.monotonic()` | `engine.py:95` | the clock used for `starttime`, `stoptime`, backoff and uptime |
+
 ---
 
 ### 12.2 `status [name...]`
@@ -814,6 +830,10 @@ exiter               EXITED    exit status 2 (expected)
     `Stopped (terminated by SIGTERM)` or `exit status 2 (unexpected)`.
 - It answers immediately.
 
+
+**Calls used:** no system call. Only `time.monotonic()` (`engine.py:238`) to compute the uptime.
+The state shown is accurate because `os.waitpid` (`engine.py:128`) updates it on every loop turn.
+
 ---
 
 ### 12.3 `start <name...>`
@@ -837,6 +857,28 @@ exiter: started
   - **RUNNING** → `name: started`;
   - **BACKOFF or FATAL** → `name: ERROR (BACKOFF: Exited too quickly ...)`. This means it died before
     `starttime`. It keeps retrying on its own, as in scenario C.
+
+
+**Calls used** (in the order they run):
+
+| call | where | why |
+|---|---|---|
+| `open(path, "ab")` | `process.py:56` | opens the `stdout`/`stderr` log files in append mode |
+| `os.environ` copy + `dict.update` | `process.py:62-63` | builds the environment with the `env:` option |
+| `os.pipe()` ×3 | `process.py:69-71` | stdin, stdout and stderr pipes |
+| **`os.fork()`** | `process.py:73` | creates the child process |
+| *child:* `os.setsid()` | `process.py:94` | new session and process group (Ctrl-C won't reach it, `killpg` can target it) |
+| *child:* **`os.dup2()`** ×3 | `process.py:95-97` | the pipes become fd 0, 1 and 2 |
+| *child:* `signal.signal(SIGPIPE, SIG_DFL)` | `process.py:98` | restores the default action that Python changed |
+| *child:* `os.umask()` | `process.py:100` | `umask:` option |
+| *child:* `os.chdir()` | `process.py:102` | `workingdir:` option |
+| *child:* `os.setgroups/setgid/setuid` | `process.py:106-108` | bonus `user:` option |
+| *child:* **`os.execvpe()`** | `process.py:110` | replaces the child with the program |
+| *child, if exec failed:* `os.write(2, ...)` + `os._exit(127)` | `process.py:112-113` | error message to stderr, exit without running taskmaster code |
+| *parent:* `os.close()` ×3 | `process.py:79-81` | closes the child's ends of the pipes |
+| *parent:* `os.set_blocking(fd, False)` | `process.py:83` | the loop never blocks on a pipe |
+| later: `select` + `os.read()` | `engine.py:106`, `process.py:121` | reads the program's output |
+| later: `os.waitpid` + `os.WEXITSTATUS` | `engine.py:128`, `process.py:220` | detects a death before `starttime` (failed start) |
 
 ---
 
@@ -862,6 +904,19 @@ stubborn: stopped
 - When **`waitpid`** reports a death, **`Process.exited`** marks the process STOPPED and the shell
   prints `name: stopped`.
 
+
+**Calls used:**
+
+| call | where | why |
+|---|---|---|
+| **`os.killpg(pid, stopsignal)`** | `process.py:195` | sends the stop signal to the whole process group |
+| `os.kill(pid, sig)` | `process.py:198` | fallback if the group is already gone |
+| `os.killpg(pid, SIGKILL)` | `process.py:209` → `process.py:195` | after `stoptime`, sent from `Process.tick` |
+| **`os.waitpid(-1, WNOHANG)`** | `engine.py:128` | collects the dead process (no zombie) |
+| `os.WIFSIGNALED` / `os.WTERMSIG` / `os.WEXITSTATUS` | `process.py:216-220` | decode how it died ("terminated by SIGTERM") |
+| `os.close(stdin_fd)` | `process.py:224` | closes our end of its stdin pipe |
+| `os.read()` returns `b""` → `os.close()` | `process.py:121`, `process.py:127` | its stdout/stderr pipes reach end of file and are closed |
+
 ---
 
 ### 12.5 `restart <name...>`
@@ -879,6 +934,10 @@ ticker:1: started
 - It then registers a `when`: once they are all dead, it runs `start_and_reply`, which is the same
   logic as `start`.
 - The answer is the one from `start`.
+
+
+**Calls used:** all the calls of `stop` (`killpg`, `waitpid`…), then all the calls of `start`
+(`pipe`, `fork`, `setsid`, `dup2`, `umask`, `chdir`, `execvpe`…).
 
 ---
 
@@ -908,6 +967,18 @@ unchanged, not restarted: crasher, exiter, showenv, echo
 - If the new file is invalid, the answer is `ERROR: ...` and `configuration NOT changed`. The running
   config stays as it was.
 
+
+**Calls used:**
+
+| call | where | why |
+|---|---|---|
+| `signal.signal(SIGHUP, on_sighup)` | `main.py:59` (`main.py:114` daemon) | for the `kill -HUP` path: the handler only sets a flag |
+| `open()` + **`yaml.safe_load()`** | `config.py:157` | reads the file again |
+| `shlex.split()` | `config.py:49` | splits `cmd` into argv like a shell would (checks it parses) |
+| `pwd.getpwnam()` | `config.py:127` | checks that the `user:` exists |
+| dataclass `==` | `engine.py:307` | compares the old and new config of each program |
+| `killpg` / `waitpid` and `fork` / `execvpe` | as in `stop` and `start` | only for programs that changed, were added or were removed |
+
 ---
 
 ### 12.7 `config [program]`
@@ -932,6 +1003,10 @@ taskmaster> config showenv
   socket and alerts.
 - It never re-reads the file. It shows what is **loaded**, which is what matters after a `reload`.
 
+
+**Calls used:** no system call. `vars(prog)` reads the fields of the stored `ProgramConfig`
+(`engine.py:380`), and an f-string with `:03o` prints the umask in octal.
+
 ---
 
 ### 12.8 `tail <name> [stdout|stderr]`
@@ -953,6 +1028,10 @@ taskmaster> tail ticker:0
   that memory buffer.
 - Because the buffer is in memory, `tail` works even with `stdout: discard`.
 
+
+**Calls used:** none at the moment you type it, because it reads the in-memory buffer. The bytes were
+read earlier by **`os.read()`** (`process.py:121`), when `select` reported the pipe as readable.
+
 ---
 
 ### 12.9 `pid [name...]`
@@ -969,6 +1048,10 @@ ticker:1: 4243
 
 **How it works:** **`cmd_pid`** (`engine.py:415`) returns `os.getpid()`, or `Process.pid` for each
 process returned by `resolve`. From another terminal: `kill -9 $(./taskmasterctl pid ticker:0 | awk '{print $2}')`.
+
+
+**Calls used:** `os.getpid()` (`engine.py:417`) for taskmaster's own PID. A program's PID is the value
+**`os.fork()`** returned in the parent (`process.py:73`), stored in `Process.pid`.
 
 ---
 
@@ -1001,6 +1084,18 @@ ECHO: HELLO
 - An attachment survives restarts of the process, because it is linked to the `Process` object, not
   to one PID.
 
+
+**Calls used:**
+
+| call | where | why |
+|---|---|---|
+| **`select.select([sys.stdin, sock])`** | `shell.py:190` | the shell waits on the keyboard and the socket at the same time |
+| `sys.stdin.readline()` | `shell.py:194` | reads the line you typed (`""` means Ctrl-D) |
+| `sock.sendall()` / `sock.recv()` | `shell.py:37`, `shell.py:45` | sends your input and receives the output |
+| `os.read(pipe)` | `process.py:121` | the engine reads what the program printed |
+| `sock.sendall()` | `engine.py:35` | the engine forwards that output to the attached shell |
+| **`os.write(stdin_fd, ...)`** | `process.py:142` | the engine writes your line into the program's stdin pipe |
+
 ---
 
 ### 12.11 `shutdown`
@@ -1021,6 +1116,17 @@ taskmaster: all programs stopped, bye
   the socket file.
 - If you run it twice, the second time answers `already shutting down`.
 
+
+**Calls used:**
+
+| call | where | why |
+|---|---|---|
+| `os.killpg(stopsignal)`, then `SIGKILL` | `process.py:195`, `process.py:209` | stops every program, as `stop all` does |
+| `os.waitpid(-1, WNOHANG)` | `engine.py:128` | waits until every program is collected |
+| `sock.close()` + **`os.unlink(socket path)`** | `engine.py:152-156` | `cleanup`: closes the connections and deletes `/tmp/taskmaster.sock` |
+| `os.kill(os.getpid(), SIGTERM)` | `main.py:66` | `./taskmaster` only, when the shutdown came from `taskmasterctl`: wakes up its own shell |
+| `thread.join()` | `main.py:78` | `./taskmaster` waits for the engine thread before exiting |
+
 ---
 
 ### 12.12 `quit` / `exit` / Ctrl-D
@@ -1038,6 +1144,11 @@ taskmaster: all programs stopped, bye
 - Ctrl-D at the prompt sends end-of-file, which `cmd.Cmd` turns into **`do_EOF`** (`shell.py:168`).
   That method calls `do_quit`.
 
+
+**Calls used:** in `./taskmaster`, the same calls as `shutdown`. In `taskmasterctl`, nothing:
+the shell returns and its socket is closed when the program exits. Ctrl-D is not a signal: it makes
+readline return end-of-file, which `cmd.Cmd` turns into `do_EOF`.
+
 ---
 
 ### 12.13 `help [command]`
@@ -1049,14 +1160,58 @@ taskmaster: all programs stopped, bye
 **How it works:** it is built into Python's `cmd.Cmd`. The text shown is the docstring (the first
 `"""..."""` line) of each `do_` method in `shell.py`. It never contacts the engine.
 
+
+**Calls used:** none. `cmd.Cmd` prints the docstrings; the engine is never contacted.
+
 ---
 
 ### 12.14 Keys and hidden commands
 
 | key / command | effect | where |
 |---|---|---|
-| **TAB** | completes command names, then process names | `completenames` / `completedefault` (`shell.py:113-117`). For names, it asks the engine with the hidden command **`names`** (`engine.py:421`) |
+| **TAB** | completes command names, then process names | `cmd.Cmd` completes command names from `get_names` (`shell.py:117`), which hides `do_EOF`; `completedefault` (`shell.py:113`) completes process names by asking the engine with the hidden command **`names`** (`engine.py:421`) |
+| `help` | lists the documented commands. `EOF` (Ctrl-D) is hidden by `get_names` (`shell.py:117`), but Ctrl-D still quits | `cmd.Cmd.do_help` |
 | **↑ / ↓** | browse command history, saved in `~/.taskmaster_history` | `setup_readline` (`shell.py:65`) |
 | **Ctrl-C** | cancels the current line or wait and shows a new prompt. Taskmaster keeps running | `Shell.run` (`shell.py:97-99`), scenario K |
 | unknown word | `*** Unknown command: foo (type 'help')` | `Shell.default` (`shell.py:107`) |
 | `input`, `detach` | internal messages used only by `attach`; you never type them | `engine.py:436-444` |
+
+**Calls used by the keys:**
+
+| call | where | why |
+|---|---|---|
+| `readline.parse_and_bind()` | `shell.py:69`, `shell.py:71` | binds TAB to completion (`bind ^I rl_complete` on macOS's libedit, `tab: complete` on Linux) |
+| `readline.set_completer()` | `shell.py:73` | readline asks `Shell.complete` for suggestions |
+| `readline.read_history_file()` / `write_history_file()` | `shell.py:76`, `shell.py:79` | loads history at start and saves it at exit (`atexit`) |
+| SIGINT (Ctrl-C) → `KeyboardInterrupt` | `shell.py:97` | Python's default SIGINT handler raises it in the main thread |
+| `sock.close()` + `socket.socket()` + `connect()` | `shell.py:60` | `reconnect` after Ctrl-C |
+
+---
+
+### 12.15 Summary: every system call and where it is used
+
+| call | file:line | used for | commands that trigger it |
+|---|---|---|---|
+| `os.fork()` | `process.py:73`, `main.py:85`, `main.py:88` | create a program's process / daemonize `taskmasterd` | `start`, `restart`, `reload`, autostart, autorestart |
+| `os.execvpe()` | `process.py:110` | replace the child with the program | same as `fork` |
+| `os.pipe()` | `process.py:69-71` | stdin/stdout/stderr pipes | same as `fork` |
+| `os.dup2()` | `process.py:95-97`, `main.py:93` | pipes → fd 0/1/2; `/dev/null` → fd 0/1/2 for the daemon | same as `fork` |
+| `os.setsid()` | `process.py:94`, `main.py:87` | own session/process group | same as `fork` |
+| `os.umask()` | `process.py:100`, `engine.py:64` | `umask:` option; socket only usable by its owner | `start` / taskmaster startup |
+| `os.chdir()` | `process.py:102`, `main.py:90` | `workingdir:` option; daemon moves to `/` | `start` / `taskmasterd` |
+| `os.setgid()` / `os.setuid()` / `os.setgroups()` | `process.py:106-108` | bonus `user:` option | `start` |
+| `os._exit()` | `process.py:113`, `main.py:86`, `main.py:89` | leave a child without running Python cleanup | failed exec, daemonize |
+| `os.waitpid(-1, WNOHANG)` | `engine.py:128` | collect dead children, know who is alive | every loop turn |
+| `os.WIFSIGNALED` / `WTERMSIG` / `WEXITSTATUS` | `process.py:216-220` | decode the exit status | every death |
+| `os.killpg()` / `os.kill()` | `process.py:195`, `process.py:198`, `main.py:66` | send `stopsignal` / SIGKILL; wake the foreground shell | `stop`, `restart`, `reload`, `shutdown` |
+| `signal.signal()` | `main.py:59-61`, `main.py:114-116`, `process.py:98` | SIGHUP → reload, SIGTERM/SIGQUIT/SIGINT → shutdown; reset SIGPIPE in the child | `kill -HUP`, `kill` |
+| `os.read()` / `os.write()` | `process.py:121`, `process.py:142`, `process.py:112` | read program output; write to its stdin; error message in the child | output, `attach` |
+| `os.close()` | `process.py:79-81`, `process.py:127`, `process.py:224` | close unused or finished pipe ends | `start`, deaths |
+| `os.set_blocking()` | `process.py:83` | non-blocking pipes | `start` |
+| `select.select()` | `engine.py:106`, `shell.py:190` | wait on many fds at once | every loop turn, `attach` |
+| `socket` `bind` / `listen` / `accept` | `engine.py:63-71`, `engine.py:109` | the control socket (server side) | startup, each new shell |
+| `socket` `connect` / `sendall` / `recv` | `shell.py:31-45`, `engine.py:35`, `engine.py:178` | shell ⇄ engine messages | every command |
+| `os.unlink()` | `engine.py:60`, `engine.py:156` | remove a stale socket file / the socket at exit | startup, `shutdown` |
+| `os.getpid()` | `engine.py:417`, `main.py:66` | taskmaster's own PID | `pid` |
+| `yaml.safe_load()` | `config.py:157` | parse the config file | startup, `reload` |
+| `threading.Thread` | `main.py:68`, `logger.py:45` | engine thread in `./taskmaster`; alert sending | startup, alerts |

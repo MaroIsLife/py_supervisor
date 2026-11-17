@@ -28,9 +28,12 @@ class EventLogger:
         self.log.addHandler(handler)
         if settings.syslog:   # bonus: /dev/log on Linux, /var/run/syslog on macOS
             address = "/dev/log" if os.path.exists("/dev/log") else "/var/run/syslog"
-            handler = logging.handlers.SysLogHandler(address=address)
-            handler.setFormatter(logging.Formatter("taskmaster: %(levelname)s %(message)s"))
-            self.log.addHandler(handler)
+            try:
+                handler = logging.handlers.SysLogHandler(address=address)
+                handler.setFormatter(logging.Formatter("taskmaster: %(levelname)s %(message)s"))
+                self.log.addHandler(handler)
+            except OSError as e:   # no syslog daemon on this machine: keep the file log only
+                self.log.error("syslog disabled: cannot connect to %s: %s", address, e)
         self.settings = settings
 
     def alert(self, event, process, message):
