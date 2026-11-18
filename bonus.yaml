@@ -5,13 +5,7 @@
 taskmaster:
   logfile: ./logs/taskmaster.log
   socket: /tmp/taskmaster.sock
-  syslog: true                                   # bonus: events also go to syslog
   http_alert: http://127.0.0.1:8080/alert        # bonus: received by programs/webhook_server.py
-  email_alert:                                   # bonus: received by programs/fake_smtp.py
-    host: 127.0.0.1
-    port: 1025
-    from: taskmaster@localhost
-    to: admin@localhost
 
 programs:
   # kill -9 one of them -> "UNEXPECTED_EXIT" alert, then restarted
@@ -21,7 +15,7 @@ programs:
     starttime: 2
     stdout: ./logs/ticker.stdout
 
-  # "start crasher" -> BACKOFF x3 -> FATAL -> "FATAL" alert (HTTP + e-mail)
+  # "start crasher" -> BACKOFF x3 -> FATAL -> "FATAL" alert (HTTP)
   crasher:
     cmd: "programs/crasher.py"
     autostart: false
@@ -33,11 +27,3 @@ programs:
     cmd: "programs/echo_repl.py"
     autorestart: always
     stdout: ./logs/echo.stdout
-
-  # Privilege de-escalation bonus: needs taskmaster to run as root.
-  # Uncomment, then run:  sudo .venv/bin/python ./taskmaster -c bonus.yaml
-  # asnobody:
-  #   cmd: "/usr/bin/id"
-  #   user: nobody
-  #   autorestart: never
-  #   stdout: /tmp/asnobody.stdout

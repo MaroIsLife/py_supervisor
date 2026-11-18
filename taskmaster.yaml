@@ -4,15 +4,14 @@
 taskmaster:
   logfile: ./logs/taskmaster.log      # event log (mandatory logging)
   socket: /tmp/taskmaster.sock        # UNIX socket used by taskmasterctl (bonus)
-  syslog: false                       # bonus: also send events to syslog
-  # http_alert: http://127.0.0.1:8080/alert          # bonus: POST alerts (programs/webhook_server.py)
-  # email_alert: {host: 127.0.0.1, port: 1025, from: taskmaster@localhost, to: admin@localhost}  # bonus (programs/fake_smtp.py)
+  http_alert: http://127.0.0.1:8080/alert          # bonus: POST alerts (programs/webhook_server.py)
 
 programs:
   # Every option, on a simple long-running program
   ticker:
     cmd: "programs/ticker.py tick"    # command to launch
     numprocs: 2                        # number of processes to keep alive (ticker:0, ticker:1)
+    user: maro
     umask: 022                         # umask before exec
     workingdir: /tmp                   # cwd before exec
     autostart: true                    # start when taskmaster starts
@@ -36,6 +35,8 @@ programs:
     startretries: 3
     starttime: 1
     stderr: ./logs/crasher.stderr
+    stdout: ./logs/crasher.stdout       # redirect stdout to a file
+
 
   # Exits with code 2 after 4s. 2 is NOT in exitcodes -> unexpected -> restarted.
   # Change exitcodes to [0, 2] and reload: it stays EXITED.
@@ -66,9 +67,9 @@ programs:
     env:
       STARTED_BY: taskmaster
       ANSWER: 42
-      GREETING: "hello from the config"
+      GREETING: "hello from the configSSS"
     stdout: ./logs/showenv.stdout
-    stderr: discard                    # throw stderr away
+    stderr: ./logs/showenv.stderr
 
   # Huge output, everything discarded (stress test)
   flood:
@@ -84,13 +85,6 @@ programs:
     autorestart: always
     stdout: ./logs/echo.stdout
 
-  # Bonus: privilege de-escalation. Start taskmaster with sudo for this to work.
-  # asnobody:
-  #   cmd: "/usr/bin/id"
-  #   user: nobody
-  #   autorestart: never
-  #   stdout: /tmp/asnobody.stdout
-
 # =============================================================================
 # REFERENCE: every option this file accepts
 # =============================================================================
@@ -98,13 +92,7 @@ programs:
 # taskmaster:                  # optional section: settings of taskmaster itself
 #   logfile: PATH              # event log                     (default /tmp/taskmaster.log)
 #   socket: PATH               # control socket, keep it short (default /tmp/taskmaster.sock)
-#   syslog: true|false         # bonus: copy events to syslog  (default false)
 #   http_alert: URL            # bonus: POST a JSON alert on FATAL / unexpected exit
-#   email_alert:               # bonus: send an e-mail for the same events
-#     host: HOST               #   SMTP server                 (default localhost)
-#     port: NUMBER             #   SMTP port                   (default 25)
-#     from: ADDRESS            #   sender                      (default taskmaster@localhost)
-#     to: ADDRESS              #   recipient (required)
 #
 # programs:                    # required section
 #   NAME:                      # program name, no ':' (numprocs > 1 -> NAME:0, NAME:1 ...)

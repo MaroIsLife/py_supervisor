@@ -24,19 +24,18 @@ daemon: setup       ## bonus: background daemon
 ctl: setup          ## bonus: control shell for the daemon
 	$(PYTHON) ./taskmasterctl -c $(CONFIG)
 
-# Bonus demo: alert receivers + daemon ($(BONUS)) + control shell.
-# Watch the alerts with:  tail -f logs/webhook.log logs/smtp.log
+# Bonus demo: HTTP alert receiver + daemon ($(BONUS)) + control shell.
+# Watch the alerts with:  tail -f logs/webhook.log
 bonus: setup
 	@$(PYTHON) programs/webhook_server.py 8080 > logs/webhook.log 2>&1 & echo $$! > logs/webhook.pid
-	@$(PYTHON) programs/fake_smtp.py 1025 > logs/smtp.log 2>&1 & echo $$! > logs/smtp.pid
 	@sleep 0.5
 	$(PYTHON) ./taskmasterd -c $(BONUS)
-	@echo "alerts: tail -f logs/webhook.log logs/smtp.log   |   stop everything: make bonus-stop"
+	@echo "alerts: tail -f logs/webhook.log   |   stop everything: make bonus-stop"
 	$(PYTHON) ./taskmasterctl -c $(BONUS)
 
-bonus-stop:         ## stop the daemon and the alert receivers
+bonus-stop:         ## stop the daemon and the alert receiver
 	-@$(PYTHON) ./taskmasterctl -c $(BONUS) shutdown
-	-@kill `cat logs/webhook.pid logs/smtp.pid 2>/dev/null` 2>/dev/null; rm -f logs/*.pid
+	-@kill `cat logs/webhook.pid 2>/dev/null` 2>/dev/null; rm -f logs/*.pid
 
 clean:              ## remove logs and caches
 	rm -rf logs/*.stdout logs/*.stderr logs/*.log logs/*.pid tmlib/__pycache__

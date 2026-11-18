@@ -8,8 +8,8 @@ make            # creates a virtual environment (.venv) and installs PyYAML in i
 make run        # foreground taskmaster + control shell (mandatory part)
 make daemon     # bonus: background daemon
 make ctl        # bonus: separate control shell for the daemon
-make bonus      # bonus demo: alert receivers + daemon (bonus.yaml) + control shell
-make bonus-stop # stop the bonus daemon and the alert receivers
+make bonus      # bonus demo: HTTP alert receiver + daemon (bonus.yaml) + control shell
+make bonus-stop # stop the bonus daemon and the alert receiver
 make clean      # remove logs  |  make fclean: also remove .venv  |  make re
 ```
 

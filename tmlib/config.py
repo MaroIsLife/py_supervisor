@@ -61,9 +61,7 @@ class ProgramConfig:
 class Settings:
     logfile: str = "/tmp/taskmaster.log"
     socket: str = "/tmp/taskmaster.sock"
-    syslog: bool = False              # bonus: copy events to syslog
     http_alert: str | None = None     # bonus: POST alerts to this URL
-    email_alert: dict | None = None   # bonus: {host, port, from, to}
 
 
 @dataclass
@@ -143,10 +141,6 @@ def _parse_settings(raw, base):
             raise ConfigError(f"section 'taskmaster': unknown option '{key}'")
     s = Settings(**raw)
     s.logfile, s.socket = _path(base, s.logfile), _path(base, s.socket)
-    if s.email_alert is not None:
-        if not isinstance(s.email_alert, dict) or "to" not in s.email_alert:
-            raise ConfigError("section 'taskmaster': email_alert needs at least 'to'")
-        s.email_alert = {"host": "localhost", "port": 25, "from": "taskmaster@localhost", **s.email_alert}
     return s
 
 
